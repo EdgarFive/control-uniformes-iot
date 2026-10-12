@@ -6,4 +6,7 @@ use CodeIgniter\Router\RouteCollection;
 $routes->get('/', 'Home::index');
 
 service('auth')->routes($routes);
+
 $routes->get('api/health', 'Api\DeteccionesController::health');
+
+$routes->post('api/detecciones', 'Api\DeteccionesController::recibir');
