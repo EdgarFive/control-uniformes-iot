@@ -108,7 +108,16 @@ class DeteccionesController extends BaseController
             );
         }
 
-        $imagen = $this->request->getBody();
+        // Leer directamente los bytes de la fotografía enviada.
+        $imagen = file_get_contents('php://input');
+
+        if ($imagen === false) {
+            return $this->error(
+                400,
+                'No se pudo leer la fotografía'
+            );
+        }
+
         $tamano = strlen($imagen);
 
         if ($tamano < 4 || $tamano > 2 * 1024 * 1024) {
