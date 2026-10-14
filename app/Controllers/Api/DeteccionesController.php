@@ -118,12 +118,35 @@ class DeteccionesController extends BaseController
             );
         }
 
+        // Comprobar las firmas de inicio y fin del archivo JPEG.
+        $inicioValido = substr($imagen, 0, 3) === "\xFF\xD8\xFF";
+        $finalValido  = substr($imagen, -2) === "\xFF\xD9";
+
         $datosImagen = @getimagesizefromstring($imagen);
 
+        // Registrar información técnica sin guardar la fotografía.
+        if ($datosImagen === false) {
+            log_message(
+                'warning',
+                'getimagesizefromstring no reconoció el JPEG. Bytes: ' . $tamano
+            );
+        }
+
         if (
-            $datosImagen === false
-            || ($datosImagen['mime'] ?? '') !== 'image/jpeg'
+            !$inicioValido
+            || !$finalValido
+            || (
+                $datosImagen !== false
+                && ($datosImagen['mime'] ?? '') !== 'image/jpeg'
+            )
         ) {
+            log_message(
+                'error',
+                'JPEG rechazado. Bytes: ' . $tamano
+                . ', inicio: ' . bin2hex(substr($imagen, 0, 4))
+                . ', final: ' . bin2hex(substr($imagen, -4))
+            );
+
             return $this->error(
                 422,
                 'Fotografía JPEG inválida'
