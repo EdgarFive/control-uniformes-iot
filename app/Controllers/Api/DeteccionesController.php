@@ -4,6 +4,7 @@ namespace App\Controllers\Api;
 
 use App\Controllers\BaseController;
 use App\Services\UniformeIAService;
+use App\Services\TelegramService;
 
 class DeteccionesController extends BaseController
 {
@@ -253,14 +254,38 @@ class DeteccionesController extends BaseController
                 );
             }
 
+            $deteccionId = (int) $db->insertID();
+
+            // Enviar alerta a Telegram después de guardar la detección
+            $telegramEnviado = false;
+
+            try {
+                $telegram = new TelegramService();
+
+                $telegramEnviado = $telegram->enviarFoto(
+                    $ruta,
+                    $deteccionId,
+                    $empresa['nombre'],
+                    $dispositivo['nombre'],
+                    $resultado['motivo']
+                );
+            } catch (\Throwable $e) {
+                log_message(
+                    'error',
+                    'No se pudo enviar la alerta de Telegram: '
+                    . $e->getMessage()
+                );
+            }
+
             return $this->response
                 ->setStatusCode(201)
                 ->setJSON([
                     'ok' => true,
-                    'deteccion_id' => (int) $db->insertID(),
+                    'deteccion_id' => $deteccionId,
                     'clasificacion' => 'sin_uniforme',
                     'motivo' => $resultado['motivo'],
                     'foto_guardada' => true,
+                    'telegram_enviado' => $telegramEnviado,
                 ]);
 
         } catch (\Throwable $e) {
