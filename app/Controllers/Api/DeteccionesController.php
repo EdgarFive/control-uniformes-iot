@@ -238,7 +238,6 @@ class DeteccionesController extends BaseController
                 );
             }
 
-            // 8. Registrar únicamente el incumplimiento
             $guardado = $db->table('detecciones')->insert([
                 'empresa_id' => $empresaId,
                 'dispositivo_id' => (int) $dispositivo['id'],
@@ -246,6 +245,8 @@ class DeteccionesController extends BaseController
                 'foto_ruta' => $empresaId . '/' . $nombreArchivo,
                 'tamano_bytes' => $tamano,
                 'clasificacion' => 'sin_uniforme',
+                'motivo' => $resultado['motivo'],
+                'telegram_enviado' => null,
             ]);
 
             if (!$guardado) {
@@ -273,6 +274,30 @@ class DeteccionesController extends BaseController
                 log_message(
                     'error',
                     'No se pudo enviar la alerta de Telegram: '
+                    . $e->getMessage()
+                );
+            }
+
+            // Registrar si Telegram confirmó el envío de la alerta.
+            try {
+                $actualizado = $db->table('detecciones')
+                    ->where('id', $deteccionId)
+                    ->where('empresa_id', $empresaId)
+                    ->update([
+                        'telegram_enviado' => $telegramEnviado,
+                    ]);
+
+                if (!$actualizado) {
+                    log_message(
+                        'error',
+                        'No se pudo actualizar el estado de Telegram. Detección: '
+                        . $deteccionId
+                    );
+                }
+            } catch (\Throwable $e) {
+                log_message(
+                    'error',
+                    'Error registrando estado de Telegram: '
                     . $e->getMessage()
                 );
             }
