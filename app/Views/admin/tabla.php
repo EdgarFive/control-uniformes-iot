@@ -1,0 +1,6 @@
+<div class="table-scroll"><table><thead><tr><th>Fecha y hora</th><th>Empresa / cámara</th><th>Clasificación</th><th>Motivo</th><th>Telegram</th><th><span class="sr-only">Acciones</span></th></tr></thead><tbody>
+<?php foreach ($rows as $row): ?>
+<tr><td class="nowrap"><?= esc(\App\Libraries\PanelTime::display($row['fecha'], $company['zona_horaria'])) ?><small>#<?= (int) $row['id'] ?></small></td><td><?= esc($row['empresa']) ?><small><?= esc($row['camara'] ?? 'Cámara no disponible') ?></small></td><td><span class="badge <?= $row['clasificacion'] === 'sin_uniforme' ? 'danger' : '' ?>"><?= esc($row['clasificacion'] === 'sin_uniforme' ? 'Sin uniforme' : $row['clasificacion']) ?></span></td><td class="reason"><?= esc($row['motivo'] ?: 'Sin motivo registrado') ?></td><td><?= view('admin/telegram', ['value' => $row['telegram_enviado']]) ?></td><td><a class="detail-link" href="<?= site_url('admin/detecciones/' . (int) $row['id']) ?>">Ver detalle <span aria-hidden="true">↗</span></a></td></tr>
+<?php endforeach ?>
+<?php if (! $rows): ?><tr><td colspan="6" class="empty"><strong>No hay detecciones</strong><p>Los incumplimientos registrados aparecerán aquí.</p></td></tr><?php endif ?>
+</tbody></table></div>

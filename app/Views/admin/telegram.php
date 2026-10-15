@@ -1,0 +1,1 @@
+<?php if ($value === null): ?><span class="badge">Sin confirmar</span><?php elseif (in_array($value, [true, 1, '1', 't', 'true'], true)): ?><span class="badge success">Enviado</span><?php else: ?><span class="badge danger">No enviado</span><?php endif ?>
