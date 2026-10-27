@@ -5,6 +5,7 @@ namespace App\Controllers\Api;
 use App\Controllers\BaseController;
 use App\Services\UniformeIAService;
 use App\Services\TelegramService;
+use App\Services\DispositivoHorarioService;
 
 class DeteccionesController extends BaseController
 {
@@ -70,6 +71,15 @@ class DeteccionesController extends BaseController
                     403,
                     'Empresa no disponible'
                 );
+            }
+
+            // Enforce the current policy even between firmware configuration polls.
+            if (! (new DispositivoHorarioService())->habilitada($dispositivo, $empresa['zona_horaria'])) {
+                return $this->response->setStatusCode(403)->setJSON([
+                    'ok' => false,
+                    'deteccion_habilitada' => false,
+                    'mensaje' => 'Detección pausada o fuera del horario configurado',
+                ]);
             }
 
             // 3. Consultar uniforme autorizado

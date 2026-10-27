@@ -1,6 +1,6 @@
 # Panel administrativo de Control de Uniformes IoT
 
-Implementación dentro de CodeIgniter 4 y Shield, sin dependencias frontend ni compilación. No requiere migraciones nuevas. Se conservó `Auth.allowRegistration = false` y no se modificaron el receptor de la ESP32-CAM, Gemini ni Telegram.
+Implementación dentro de CodeIgniter 4 y Shield, sin dependencias frontend ni compilación. El panel original no requería migraciones nuevas. La ampliación de horarios y estadísticas sí añade una migración y una validación en el receptor: consultar [HORARIOS_ESTADISTICAS.md](HORARIOS_ESTADISTICAS.md) para el comportamiento y despliegue vigentes. Se conservan `Auth.allowRegistration = false`, Gemini y Telegram.
 
 ## Funcionalidades
 
@@ -90,7 +90,7 @@ Prueba manual: inicia sesión, revisa las tarjetas y la gráfica, abre el histor
 3. Reutiliza el servicio, PostgreSQL, volumen persistente y configuración de arranque existentes. No necesitas otro proyecto, base de datos ni proceso frontend.
 4. Conserva los secretos actuales. Revisa de forma privada que `CI_ENVIRONMENT=production`, que `app.baseURL` corresponde al dominio HTTPS y que `PHOTO_STORAGE_DIR` apunta al directorio existente dentro del volumen montado. El usuario del proceso PHP necesita lectura de esas fotografías; `writable` debe seguir siendo escribible para las sesiones.
 5. Tras aprobar la publicación, incluye los archivos del panel en el commit y publica a la rama que ya utiliza el servicio. Si esa rama tiene autodeploy activo, un push puede iniciar el despliegue automáticamente: compruébalo antes de publicar. [Documentación de autodeploy de Railway](https://docs.railway.com/deployments/github-autodeploys).
-6. No hace falta ejecutar migraciones nuevas para este panel. La comprobación local encontró `motivo` y `telegram_enviado`; verifica también el entorno de destino con `panel:check`. Si faltan allí, revisa la migración aditiva existente antes de autorizar su ejecución.
+6. El panel original no añadía migraciones. La ampliación de horarios requiere aplicar la migración aditiva nueva antes de habilitar su código; sigue [HORARIOS_ESTADISTICAS.md](HORARIOS_ESTADISTICAS.md). Comprueba también `motivo` y `telegram_enviado` con `panel:check`.
 7. Espera a que finalice el despliegue y prueba `/api/health`, `/login`, `/admin`, historial, detalle y fotografía con la cuenta real. Comprueba que una sesión cerrada no puede consultar fotografías. Verifica recepción de la ESP32-CAM con su flujo habitual.
 
 Si necesitas ajustar variables de Railway, sus cambios se preparan y requieren aplicarse mediante un despliegue; no cambies variables que ya funcionan sin necesidad. [Documentación de variables de Railway](https://docs.railway.com/variables).

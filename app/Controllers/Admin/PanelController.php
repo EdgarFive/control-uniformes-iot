@@ -5,6 +5,8 @@ namespace App\Controllers\Admin;
 use App\Controllers\BaseController;
 use App\Libraries\PanelPhoto;
 use App\Libraries\PanelTime;
+use App\Services\DispositivoHorarioService;
+use App\Services\EstadisticasService;
 use CodeIgniter\Exceptions\PageNotFoundException;
 use DateTimeImmutable;
 
@@ -90,8 +92,23 @@ class PanelController extends BaseController
                 ->where('fecha >=', PanelTime::utc($day))->where('fecha <', PanelTime::utc($day->modify('+1 day')))
                 ->where('fecha <=', $end)->countAllResults()];
         }
+        $mode = $this->request->getGet('vista') ?? 'dia';
+        $from = $this->request->getGet('desde') ?? $today->format('Y-m-d');
+        $to = $this->request->getGet('hasta') ?? $from;
+        $hourly = [];
+        $error = null;
+        if (! is_string($mode) || ! in_array($mode, ['dia', 'hora'], true)
+            || ! is_string($from) || ! is_string($to) || strlen($from) !== 10 || strlen($to) !== 10) {
+            return $this->response->setStatusCode(400)->setBody('Filtros inválidos.');
+        }
+        try {
+            // Validate filters in both modes; the historical daily chart stays intact.
+            $hourly = (new EstadisticasService())->porHora((int) $company['id'], $company['zona_horaria'], $from, $to);
+        } catch (\InvalidArgumentException $e) {
+            $error = $e->getMessage();
+        }
         $recent = $this->detections((int) $company['id'])->orderBy('d.fecha', 'DESC')->orderBy('d.id', 'DESC')->limit(6)->get()->getResultArray();
-        return $this->render('dashboard', $context, compact('stats', 'days', 'recent'));
+        return $this->render('dashboard', $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'error'));
     }
 
     public function historial()
@@ -190,10 +207,83 @@ class PanelController extends BaseController
     public function dispositivos()
     {
         $context = $this->context();
-        $rows = $context['company'] ? db_connect()->table('dispositivos d')->select('d.id, d.nombre, d.codigo, d.estado, d.ultima_conexion, s.nombre as sede')
+        $rows = $context['company'] ? db_connect()->table('dispositivos d')->select('d.id, d.nombre, d.codigo, d.estado, d.ultima_conexion, d.deteccion_pausada, d.horario_configurado, s.nombre as sede')
             ->join('sedes s', 's.id = d.sede_id AND s.empresa_id = d.empresa_id', 'left')->where('d.empresa_id', $context['company']['id'])
             ->orderBy('d.nombre')->get()->getResultArray() : [];
-        return $this->render('dispositivos', $context, compact('rows'));
+        $periods = [];
+        if ($rows) {
+            $periods = db_connect()->table('dispositivo_horarios')->whereIn('dispositivo_id', array_column($rows, 'id'))
+                ->orderBy('dia')->orderBy('inicio')->get()->getResultArray();
+        }
+        return $this->render('dispositivos', $context, compact('rows', 'periods'));
+    }
+
+    private function editableDevice(int $id): ?array
+    {
+        $context = $this->context();
+        $company = $context['company'];
+        if (! $company || (! auth('session')->user()->inGroup('superadmin') && ! in_array($company['rol'], ['admin', 'superadmin'], true))) {
+            return null;
+        }
+        $device = db_connect()->table('dispositivos')->where('id', $id)->where('empresa_id', $company['id'])->get()->getRowArray();
+        if (! $device) {
+            throw PageNotFoundException::forPageNotFound();
+        }
+        return ['company' => $company, 'device' => $device];
+    }
+
+    public function guardarHorario(int $id)
+    {
+        $scope = $this->editableDevice($id);
+        if ($scope === null) {
+            return $this->response->setStatusCode(403)->setBody(view('admin/denegado'));
+        }
+        $url = site_url('admin/dispositivos?empresa=' . $scope['company']['id']);
+        try {
+            $mode = $this->request->getPost('horario_configurado');
+            if (! in_array($mode, ['0', '1'], true)) {
+                throw new \InvalidArgumentException('Selecciona un modo de horario válido.');
+            }
+            $periods = DispositivoHorarioService::validar($this->request->getPost('periodos') ?? []);
+        } catch (\InvalidArgumentException $e) {
+            return redirect()->to($url)->with('error', $e->getMessage());
+        }
+        $db = db_connect();
+        $db->transBegin();
+        try {
+            // Updating the parent first serializes concurrent PostgreSQL schedule saves.
+            $db->table('dispositivos')->where('id', $id)->where('empresa_id', $scope['company']['id'])
+                ->update(['horario_configurado' => $mode === '1']);
+            $db->table('dispositivo_horarios')->where('dispositivo_id', $id)->delete();
+            foreach ($periods as $period) {
+                $db->table('dispositivo_horarios')->insert(['dispositivo_id' => $id] + $period);
+            }
+            if ($db->transStatus() === false) {
+                throw new \RuntimeException('No se pudo guardar el horario.');
+            }
+            $db->transCommit();
+        } catch (\Throwable $e) {
+            $db->transRollback();
+            log_message('error', 'Guardar horario: ' . $e->getMessage());
+            return redirect()->to($url)->with('error', 'No se pudo guardar el horario; se conservó la configuración anterior.');
+        }
+        return redirect()->to($url)->with('message', 'Horario actualizado. La cámara consultará el cambio en aproximadamente 60 segundos.');
+    }
+
+    public function pausarDispositivo(int $id)
+    {
+        $scope = $this->editableDevice($id);
+        if ($scope === null) {
+            return $this->response->setStatusCode(403)->setBody(view('admin/denegado'));
+        }
+        $paused = $this->request->getPost('pausada');
+        if (! in_array($paused, ['0', '1'], true)) {
+            return $this->response->setStatusCode(400)->setBody('Estado de pausa inválido.');
+        }
+        db_connect()->table('dispositivos')->where('id', $id)->where('empresa_id', $scope['company']['id'])
+            ->update(['deteccion_pausada' => $paused === '1']);
+        return redirect()->to(site_url('admin/dispositivos?empresa=' . $scope['company']['id']))
+            ->with('message', $paused === '1' ? 'Cámara pausada.' : 'Cámara reactivada según su horario.');
     }
 
     public function uniformes()
