@@ -73,14 +73,17 @@ final class PanelTest extends CIUnitTestCase
 
     public function testGuestsCannotReadAnyAdministrativePageOrPhoto(): void
     {
-        foreach (['admin', 'admin/detecciones', 'admin/detecciones/1', 'admin/detecciones/1/foto', 'admin/dispositivos', 'admin/uniformes'] as $url) {
+        foreach (['admin', 'admin/estadisticas', 'admin/detecciones', 'admin/detecciones/1', 'admin/detecciones/1/foto', 'admin/dispositivos', 'admin/uniformes'] as $url) {
             $this->get($url)->assertRedirectTo(site_url('login'));
         }
     }
 
     public function testLoginIsAvailableAndRegistrationIsAbsent(): void
     {
-        $this->get('login')->assertSee('Iniciar sesión');
+        $login = $this->get('login');
+        $login->assertSee('Iniciar sesión');
+        $this->assertStringContainsString('<title>Iniciar sesión · Uniform</title>', $login->response()->getBody());
+        $login->assertDontSee('Control de Uniformes IoT');
         $this->assertNotFound('register');
         $this->assertNotFound('logout');
     }
@@ -145,7 +148,7 @@ final class PanelTest extends CIUnitTestCase
     public function testAdminOnlySeesOwnCompanyAcrossPages(): void
     {
         $this->actingAs($this->admin());
-        foreach (['admin', 'admin/detecciones', 'admin/detecciones/1', 'admin/dispositivos', 'admin/uniformes'] as $url) {
+        foreach (['admin', 'admin/estadisticas', 'admin/detecciones', 'admin/detecciones/1', 'admin/dispositivos', 'admin/uniformes'] as $url) {
             $result = $this->get($url);
             $result->assertOK();
             $result->assertSee('Empresa autorizada');
@@ -157,7 +160,7 @@ final class PanelTest extends CIUnitTestCase
     public function testOtherCompanyDetailPhotoAndSelectorAreNotAccessible(): void
     {
         $this->actingAs($this->admin());
-        foreach (['admin/detecciones/2', 'admin/detecciones/2/foto', 'admin?empresa=2', 'admin/uniformes?empresa=2'] as $url) {
+        foreach (['admin/detecciones/2', 'admin/detecciones/2/foto', 'admin?empresa=2', 'admin/estadisticas?empresa=2', 'admin/uniformes?empresa=2'] as $url) {
             $this->assertNotFound($url);
         }
     }
@@ -166,6 +169,7 @@ final class PanelTest extends CIUnitTestCase
     {
         $this->actingAs($this->admin('superadmin', false));
         $this->get('admin')->assertStatus(403);
+        $this->get('admin/estadisticas')->assertStatus(403);
         $this->assertNotFound('admin/detecciones/1/foto');
     }
 
@@ -173,6 +177,7 @@ final class PanelTest extends CIUnitTestCase
     {
         $this->actingAs($this->admin('user'));
         $this->get('admin')->assertStatus(403);
+        $this->get('admin/estadisticas')->assertStatus(403);
         $this->get('admin/detecciones/1/foto')->assertStatus(403);
     }
 
@@ -182,6 +187,7 @@ final class PanelTest extends CIUnitTestCase
         $this->get('admin')->assertOK();
         $this->db->table('usuarios_empresas')->where('empresa_id', 1)->update(['activo' => false]);
         $this->get('admin')->assertStatus(403);
+        $this->get('admin/estadisticas')->assertStatus(403);
         $this->assertNotFound('admin/detecciones/1');
     }
 
@@ -399,5 +405,65 @@ final class PanelTest extends CIUnitTestCase
         $this->withSession($_SESSION)->post('admin/dispositivos/1/horarios', ['horario_configurado' => '1', csrf_token() => csrf_hash()])->assertStatus(403);
         $this->expectException(\CodeIgniter\Security\Exceptions\SecurityException::class);
         $this->post('admin/dispositivos/1/pausa', ['pausada' => '1']);
+    }
+
+    public function testUniformBrandAndStatisticsNavigation(): void
+    {
+        $this->actingAs($this->admin());
+        $result = $this->get('admin/estadisticas?empresa=1');
+        $result->assertOK();
+        $body = $result->response()->getBody();
+        $this->assertStringContainsString('<title>Estadísticas · Uniform</title>', $body);
+        $this->assertStringContainsString('<span>Uniform<span class="brand-sub">', $body);
+        $result->assertDontSee('Uniformes IoT');
+        $result->assertSee('Este mes');
+        $result->assertSee('Incumplimientos por día');
+        $result->assertDontSee('Últimas detecciones');
+        preg_match('~<nav aria-label="Navegación principal">(.*?)</nav>~s', $body, $nav);
+        $previous = -1;
+        foreach (['Resumen', 'Estadísticas', 'Detecciones', 'Dispositivos', 'Uniformes'] as $label) {
+            $position = strpos($nav[1], $label . '</a>');
+            $this->assertNotFalse($position);
+            $this->assertGreaterThan($previous, $position);
+            $previous = $position;
+        }
+        $this->assertMatchesRegularExpression('~class="nav-link active"[^>]*aria-current="page"[^>]*href="[^"]*/admin/estadisticas\?empresa=1"~', $nav[1]);
+    }
+
+    public function testStatisticsAndSummaryReuseIdenticalDailyAndHourlyContent(): void
+    {
+        $this->actingAs($this->admin());
+        $day = (new DateTimeImmutable('now', new DateTimeZone('America/Guatemala')))->format('Y-m-d');
+        foreach (['dia', 'hora'] as $mode) {
+            $query = '?empresa=1&vista=' . $mode . '&desde=' . $day . '&hasta=' . $day;
+            $summary = $this->get('admin' . $query);
+            $summary->assertOK();
+            $summary->assertSee('Últimas detecciones');
+            $statistics = $this->get('admin/estadisticas' . $query);
+            $statistics->assertOK();
+            foreach ([$summary, $statistics] as $index => $result) {
+                preg_match('~<div class="stats-grid">.*?</section>~s', $result->response()->getBody(), $content);
+                $this->assertNotEmpty($content);
+                $rendered[$index] = $content[0];
+            }
+            $this->assertSame($rendered[0], $rendered[1]);
+        }
+    }
+
+    public function testStatisticsRetainsHourlyFiltersValidationAndCompanyPermissions(): void
+    {
+        $this->actingAs($this->admin('admin', true, 'consulta'));
+        $result = $this->get('admin/estadisticas?empresa=1&vista=hora&desde=2026-10-26&hasta=2026-10-28');
+        $result->assertOK();
+        $result->assertSee('Incumplimientos por hora');
+        $result->assertSee('America/Guatemala');
+        $result->assertSee('2026-10-26');
+        $result->assertSee('2026-10-28');
+        $result->assertSee('00:00');
+        $result->assertSee('23:00');
+        $this->get('admin/estadisticas?vista=hora&desde=2026-10-26&hasta=2026-10-29')->assertSee('Selecciona entre uno y tres días');
+        $this->get('admin/estadisticas?vista=hora&desde=2026-02-30&hasta=2026-02-30')->assertSee('Introduce fechas válidas');
+        $this->get('admin/estadisticas?vista[]=hora')->assertStatus(400);
+        $this->assertNotFound('admin/estadisticas?empresa=2');
     }
 }

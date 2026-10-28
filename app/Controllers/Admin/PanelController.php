@@ -50,6 +50,7 @@ class PanelController extends BaseController
         }
         [$title, $subtitle, $section] = match ($view) {
             'dashboard' => ['Resumen de actividad', 'Incumplimientos registrados por tus dispositivos.', ''],
+            'estadisticas' => ['Estadísticas', 'Consulta los incumplimientos registrados por tu empresa.', '/estadisticas'],
             'historial' => ['Historial de detecciones', 'Consulta evidencias, motivos y notificaciones.', '/detecciones'],
             'detalle' => ['Detección #' . $data['row']['id'], 'Evidencia y resultado del análisis de uniforme.', '/detecciones'],
             'dispositivos' => ['Dispositivos', 'Cámaras registradas en ' . $context['company']['nombre'] . '.', '/dispositivos'],
@@ -69,9 +70,19 @@ class PanelController extends BaseController
 
     public function index()
     {
+        return $this->actividad('dashboard');
+    }
+
+    public function estadisticas()
+    {
+        return $this->actividad('estadisticas');
+    }
+
+    private function actividad(string $view)
+    {
         $context = $this->context();
         if (! $context['company']) {
-            return $this->render('dashboard', $context);
+            return $this->render($view, $context);
         }
         $company = $context['company'];
         $now = new DateTimeImmutable('now', PanelTime::zone($company['zona_horaria']));
@@ -107,8 +118,10 @@ class PanelController extends BaseController
         } catch (\InvalidArgumentException $e) {
             $error = $e->getMessage();
         }
-        $recent = $this->detections((int) $company['id'])->orderBy('d.fecha', 'DESC')->orderBy('d.id', 'DESC')->limit(6)->get()->getResultArray();
-        return $this->render('dashboard', $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'error'));
+        $recent = $view === 'dashboard'
+            ? $this->detections((int) $company['id'])->orderBy('d.fecha', 'DESC')->orderBy('d.id', 'DESC')->limit(6)->get()->getResultArray()
+            : [];
+        return $this->render($view, $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'error'));
     }
 
     public function historial()

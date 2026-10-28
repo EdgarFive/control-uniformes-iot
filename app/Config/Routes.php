@@ -11,6 +11,7 @@ $routes->post('logout', '\CodeIgniter\Shield\Controllers\LoginController::logout
 
 $routes->group('admin', ['filter' => ['panel', 'csrf']], static function (RouteCollection $routes) {
     $routes->get('/', 'Admin\PanelController::index');
+    $routes->get('estadisticas', 'Admin\PanelController::estadisticas');
     $routes->get('detecciones', 'Admin\PanelController::historial');
     $routes->get('detecciones/(:num)', 'Admin\PanelController::detalle/$1');
     $routes->get('detecciones/(:num)/foto', 'Admin\PanelController::foto/$1');
