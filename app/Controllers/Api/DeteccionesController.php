@@ -117,8 +117,8 @@ class DeteccionesController extends BaseController
             );
         }
 
-        // Leer directamente los bytes de la fotografía enviada.
-        $imagen = $this->request->getBody() ?? '';
+        // Read the binary image, including servers where CI leaves the stream URI cached.
+        $imagen = $this->leerImagen();
 
         if ($imagen === false) {
             return $this->error(
@@ -354,6 +354,21 @@ class DeteccionesController extends BaseController
                 'No se pudo guardar la detección'
             );
         }
+    }
+
+    protected function leerImagen(): string|false
+    {
+        $body = $this->request->getBody();
+        // CI can leave this literal in getBody() when post_max_size=0 (unlimited).
+        if ($body === 'php://input' || $body === null || $body === '') {
+            return $this->leerEntradaCruda();
+        }
+        return $body;
+    }
+
+    protected function leerEntradaCruda(): string|false
+    {
+        return file_get_contents('php://input');
     }
 
     private function error(int $codigo, string $mensaje)
