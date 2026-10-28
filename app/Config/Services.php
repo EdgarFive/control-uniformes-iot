@@ -19,6 +19,16 @@ use CodeIgniter\Config\BaseService;
  */
 class Services extends BaseService
 {
+    public static function uniformeIA(bool $getShared = true): \App\Services\UniformeIAService
+    {
+        return $getShared ? static::getSharedInstance('uniformeIA') : new \App\Services\UniformeIAService();
+    }
+
+    public static function telegram(bool $getShared = true): \App\Services\TelegramService
+    {
+        return $getShared ? static::getSharedInstance('telegram') : new \App\Services\TelegramService();
+    }
+
     /*
      * public static function example($getShared = true)
      * {

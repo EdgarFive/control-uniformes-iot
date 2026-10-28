@@ -16,6 +16,58 @@ final class PanelTest extends CIUnitTestCase
 
     protected $namespace = ['CodeIgniter\Settings', 'CodeIgniter\Shield'];
 
+    private ?string $analysisStorage = null;
+    private string|false $previousStorage = false;
+
+    protected function tearDown(): void
+    {
+        \Config\Services::resetSingle('uniformeIA');
+        \Config\Services::resetSingle('telegram');
+        if ($this->analysisStorage !== null) {
+            putenv($this->previousStorage === false ? 'PHOTO_STORAGE_DIR' : 'PHOTO_STORAGE_DIR=' . $this->previousStorage);
+            // Only the unique test directory created by useAnalysisStorage is removed.
+            foreach (glob($this->analysisStorage . '/*') as $directory) {
+                foreach (glob($directory . '/*') as $file) unlink($file);
+                rmdir($directory);
+            }
+            rmdir($this->analysisStorage);
+        }
+        parent::tearDown();
+    }
+
+    private function useAnalysisStorage(): string
+    {
+        $this->previousStorage = getenv('PHOTO_STORAGE_DIR');
+        $this->analysisStorage = WRITEPATH . 'testing/analysis-' . bin2hex(random_bytes(6));
+        mkdir($this->analysisStorage, 0700, true);
+        putenv('PHOTO_STORAGE_DIR=' . $this->analysisStorage);
+        return $this->analysisStorage;
+    }
+
+    private function analysisJpeg(): string
+    {
+        // JPEG metadata fixture for the receiver; Gemini is always mocked.
+        return "\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+            . "\xFF\xC0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xFF\xD9";
+    }
+
+    private function analysisDependencies(string $classification): void
+    {
+        $ia = $this->createMock(\App\Services\UniformeIAService::class);
+        $ia->expects($this->once())->method('analizar')->with($this->analysisJpeg(), 'Camisa blanca')
+            ->willReturn(['clasificacion' => $classification, 'motivo' => 'Motivo del análisis de prueba']);
+        $telegram = $this->createMock(\App\Services\TelegramService::class);
+        $telegram->expects($this->never())->method('enviarFoto');
+        \Config\Services::injectMock('uniformeIA', $ia);
+        \Config\Services::injectMock('telegram', $telegram);
+    }
+
+    private function postAnalysis()
+    {
+        return $this->withHeaders(['X-Device-Token' => '1', 'Content-Type' => 'image/jpeg'])
+            ->withBody($this->analysisJpeg())->post('api/detecciones');
+    }
+
     protected function setUp(): void
     {
         if (! extension_loaded('sqlite3')) {
@@ -31,7 +83,7 @@ final class PanelTest extends CIUnitTestCase
             'sedes' => 'id INTEGER PRIMARY KEY, empresa_id INTEGER, nombre TEXT',
             'dispositivos' => 'id INTEGER PRIMARY KEY, empresa_id INTEGER, sede_id INTEGER, nombre TEXT, codigo TEXT, token_hash TEXT, estado TEXT, ultima_conexion TEXT, deteccion_pausada BOOLEAN DEFAULT 0, horario_configurado BOOLEAN DEFAULT 0',
             'dispositivo_horarios' => 'id INTEGER PRIMARY KEY, dispositivo_id INTEGER, dia INTEGER, inicio TEXT, fin TEXT',
-            'detecciones' => 'id INTEGER PRIMARY KEY, empresa_id INTEGER, dispositivo_id INTEGER, fecha TEXT, clasificacion TEXT, motivo TEXT, telegram_enviado BOOLEAN, foto_ruta TEXT',
+            'detecciones' => 'id INTEGER PRIMARY KEY, empresa_id INTEGER, dispositivo_id INTEGER, fecha TEXT, clasificacion TEXT, motivo TEXT, telegram_enviado BOOLEAN, foto_ruta TEXT, tamano_bytes INTEGER',
             'uniformes' => 'id INTEGER PRIMARY KEY, empresa_id INTEGER, nombre TEXT, descripcion TEXT, activo BOOLEAN, updated_at TEXT',
         ];
         foreach ($schema as $table => $columns) {
@@ -117,7 +169,8 @@ final class PanelTest extends CIUnitTestCase
         $this->db->table('detecciones')->insert(['id' => 3, 'empresa_id' => 1, 'dispositivo_id' => 1, 'fecha' => gmdate('Y-m-d H:i:s'), 'clasificacion' => 'no_concluyente']);
         $result = $this->get('admin');
         $result->assertOK();
-        $this->assertSame(3, substr_count($result->response()->getBody(), '<strong>1</strong>'));
+        $existingIndicators = explode('<section class="card">', $result->response()->getBody(), 2)[0];
+        $this->assertSame(3, substr_count($existingIndicators, '<strong>1</strong>'));
     }
 
     public function testUniformEditIsScopedAndCsrfProtected(): void
@@ -442,7 +495,7 @@ final class PanelTest extends CIUnitTestCase
             $statistics = $this->get('admin/estadisticas' . $query);
             $statistics->assertOK();
             foreach ([$summary, $statistics] as $index => $result) {
-                preg_match('~<div class="stats-grid">.*?</section>~s', $result->response()->getBody(), $content);
+                preg_match('~<div class="stats-grid period-cards">.*?</section>~s', $result->response()->getBody(), $content);
                 $this->assertNotEmpty($content);
                 // Compare chart content independently of selector options.
                 $rendered[$index] = preg_replace('~<select id="vista".*?</select>~s', '', $content[0]);
@@ -545,5 +598,302 @@ final class PanelTest extends CIUnitTestCase
         $this->db->table('usuarios_empresas')->where('empresa_id', 1)->update(['activo' => false]);
         $this->get('admin/estadisticas?vista=mes')->assertStatus(403);
         $this->get('admin?vista=mes')->assertStatus(403);
+    }
+
+    private function assertAnalysisWithoutPhoto(string $classification): void
+    {
+        $base = $this->useAnalysisStorage();
+        $history = $this->db->table('detecciones')->orderBy('id')->get()->getResultArray();
+        $this->analysisDependencies($classification);
+        $beforeUtc = gmdate('Y-m-d H:i:s');
+        $result = $this->postAnalysis();
+        $result->assertStatus(200);
+        $this->assertSame([
+            'ok' => true, 'clasificacion' => $classification,
+            'motivo' => 'Motivo del análisis de prueba', 'foto_guardada' => false,
+        ], json_decode($result->response()->getBody(), true));
+        $row = $this->db->table('detecciones')->where('id', 3)->get()->getRowArray();
+        $this->assertSame($classification, $row['clasificacion']);
+        $this->assertSame('Motivo del análisis de prueba', $row['motivo']);
+        $this->assertSame(1, (int) $row['empresa_id']);
+        $this->assertSame(1, (int) $row['dispositivo_id']);
+        $this->assertNull($row['foto_ruta']);
+        $this->assertNull($row['tamano_bytes']);
+        $this->assertNull($row['telegram_enviado']);
+        $this->assertGreaterThanOrEqual($beforeUtc, $row['fecha']);
+        $this->assertLessThanOrEqual(gmdate('Y-m-d H:i:s'), $row['fecha']);
+        $this->assertSame([], glob($base . '/*'));
+        $this->assertSame($history, $this->db->table('detecciones')->where('id <=', 2)->orderBy('id')->get()->getResultArray());
+    }
+
+    public function testConUniformeIsStoredWithoutPhotoOrTelegramAndKeepsHttpContract(): void
+    {
+        $this->assertAnalysisWithoutPhoto('con_uniforme');
+    }
+
+    public function testNoConcluyenteIsStoredWithoutPhotoOrTelegramAndKeepsHttpContract(): void
+    {
+        $this->assertAnalysisWithoutPhoto('no_concluyente');
+    }
+
+    public function testSinUniformeStillStoresPhotoBeforeTelegramAndKeepsHttpContract(): void
+    {
+        $base = $this->useAnalysisStorage();
+        $history = $this->db->table('detecciones')->orderBy('id')->get()->getResultArray();
+        $ia = $this->createMock(\App\Services\UniformeIAService::class);
+        $ia->expects($this->once())->method('analizar')->with($this->analysisJpeg(), 'Camisa blanca')
+            ->willReturn(['clasificacion' => 'sin_uniforme', 'motivo' => 'Incumplimiento de prueba']);
+        $telegram = $this->createMock(\App\Services\TelegramService::class);
+        $telegram->expects($this->once())->method('enviarFoto')->willReturnCallback(function ($path, $id, $company, $device, $reason) use ($base) {
+            $this->assertSame($this->analysisJpeg(), file_get_contents($path));
+            $row = $this->db->table('detecciones')->where('id', $id)->get()->getRowArray();
+            $this->assertSame('sin_uniforme', $row['clasificacion']);
+            $this->assertSame(str_replace('\\', '/', $base . '/' . $row['foto_ruta']), str_replace('\\', '/', $path));
+            $this->assertSame('Empresa autorizada', $company);
+            $this->assertSame('Cámara 1', $device);
+            $this->assertSame('Incumplimiento de prueba', $reason);
+            return true;
+        });
+        \Config\Services::injectMock('uniformeIA', $ia);
+        \Config\Services::injectMock('telegram', $telegram);
+        $result = $this->postAnalysis();
+        $result->assertStatus(201);
+        $this->assertSame([
+            'ok' => true, 'deteccion_id' => 3, 'clasificacion' => 'sin_uniforme',
+            'motivo' => 'Incumplimiento de prueba', 'foto_guardada' => true, 'telegram_enviado' => true,
+        ], json_decode($result->response()->getBody(), true));
+        $row = $this->db->table('detecciones')->where('id', 3)->get()->getRowArray();
+        $this->assertSame(strlen($this->analysisJpeg()), (int) $row['tamano_bytes']);
+        $this->assertTrue(\App\Services\DispositivoHorarioService::boolean($row['telegram_enviado']));
+        $this->assertCount(1, glob($base . '/1/*'));
+        $this->assertSame($history, $this->db->table('detecciones')->where('id <=', 2)->orderBy('id')->get()->getResultArray());
+    }
+
+    public function testGeminiTechnicalFailureDoesNotStoreAnythingOrNotify(): void
+    {
+        $base = $this->useAnalysisStorage();
+        $history = $this->db->table('detecciones')->orderBy('id')->get()->getResultArray();
+        $ia = $this->createMock(\App\Services\UniformeIAService::class);
+        $ia->expects($this->once())->method('analizar')->willThrowException(new RuntimeException('Gemini HTTP 503'));
+        $telegram = $this->createMock(\App\Services\TelegramService::class);
+        $telegram->expects($this->never())->method('enviarFoto');
+        \Config\Services::injectMock('uniformeIA', $ia);
+        \Config\Services::injectMock('telegram', $telegram);
+        $this->postAnalysis()->assertStatus(502);
+        $this->assertSame($history, $this->db->table('detecciones')->orderBy('id')->get()->getResultArray());
+        $this->assertSame([], glob($base . '/*'));
+    }
+
+    public function testPausedOrOutOfScheduleJpegNeverAnalyzesOrStores(): void
+    {
+        $base = $this->useAnalysisStorage();
+        $history = $this->db->table('detecciones')->orderBy('id')->get()->getResultArray();
+        $ia = $this->createMock(\App\Services\UniformeIAService::class);
+        $ia->expects($this->never())->method('analizar');
+        $telegram = $this->createMock(\App\Services\TelegramService::class);
+        $telegram->expects($this->never())->method('enviarFoto');
+        \Config\Services::injectMock('uniformeIA', $ia);
+        \Config\Services::injectMock('telegram', $telegram);
+        foreach ([['deteccion_pausada' => true, 'horario_configurado' => false], ['deteccion_pausada' => false, 'horario_configurado' => true]] as $state) {
+            $this->db->table('dispositivos')->where('id', 1)->update($state);
+            $this->postAnalysis()->assertStatus(403);
+        }
+        $this->assertSame($history, $this->db->table('detecciones')->orderBy('id')->get()->getResultArray());
+        $this->assertSame([], glob($base . '/*'));
+    }
+
+    public function testFailedMetadataInsertCannotReturnSuccessfulAnalysis(): void
+    {
+        $this->useAnalysisStorage();
+        $this->analysisDependencies('con_uniforme');
+        $this->db->query('CREATE TEMP TRIGGER reject_analysis BEFORE INSERT ON ' . $this->db->prefixTable('detecciones') . " BEGIN SELECT RAISE(FAIL, 'isolated insert failure'); END");
+        try {
+            $this->postAnalysis()->assertStatus(500);
+            $this->assertSame(2, $this->db->table('detecciones')->countAllResults());
+        } finally {
+            $this->db->query('DROP TRIGGER reject_analysis');
+        }
+    }
+
+    public function testAnalysisStatisticsUseConclusiveDenominatorAndLocalDateScope(): void
+    {
+        foreach ([
+            [100, 1, '2026-10-26 06:00:00', 'con_uniforme'],
+            [101, 1, '2026-10-26 06:30:00', 'con_uniforme'],
+            [102, 1, '2026-10-27 05:59:59', 'sin_uniforme'],
+            [103, 1, '2026-10-27 05:00:00', 'no_concluyente'],
+            [104, 2, '2026-10-26 06:00:00', 'con_uniforme'],
+            [105, 1, '2026-10-27 06:00:00', 'con_uniforme'],
+            [106, 1, '2026-10-26 05:59:59', 'con_uniforme'],
+            [107, 1, '2026-10-26 06:00:00', 'pendiente'],
+        ] as [$id, $company, $date, $classification]) {
+            $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => $company, 'dispositivo_id' => $company, 'fecha' => $date, 'clasificacion' => $classification]);
+        }
+        $zone = \App\Libraries\PanelTime::zone('America/Guatemala');
+        $start = \App\Libraries\PanelTime::day('2026-10-26', $zone);
+        $data = (new \App\Services\EstadisticasService())->analisis(1, $start, $start->modify('+1 day'));
+        $this->assertSame(['con_uniforme' => 2, 'sin_uniforme' => 1, 'no_concluyente' => 1, 'total' => 4, 'concluyentes' => 3, 'cumplimiento' => 66.67], $data);
+        $this->actingAs($this->admin());
+        $result = $this->get('admin/estadisticas?vista=hora&desde=2026-10-26&hasta=2026-10-26');
+        $result->assertOK();
+        $result->assertSee('66,67 %');
+        $result->assertSee('2 con uniforme / 3 análisis concluyentes');
+        $result->assertSee('Total del período: 1'); // Existing infringement chart remains unchanged.
+        $result->assertDontSee('Antes de esta actualización solo se almacenaban incumplimientos');
+    }
+
+    public function testNoConclusiveAnalysesShowNdAndLegacyRowsAreNotReconstructed(): void
+    {
+        $service = new \App\Services\EstadisticasService();
+        $start = new DateTimeImmutable('2000-01-01', new DateTimeZone('UTC'));
+        $end = new DateTimeImmutable('2100-01-01', new DateTimeZone('UTC'));
+        $legacy = $service->analisis(1, $start, $end);
+        $this->assertSame(0, $legacy['con_uniforme']);
+        $this->assertSame(1, $legacy['sin_uniforme']);
+        $this->assertSame(0.0, $legacy['cumplimiento']);
+        $this->db->table('detecciones')->where('empresa_id', 1)->update(['clasificacion' => 'no_concluyente', 'foto_ruta' => null]);
+        $this->assertNull($service->analisis(1, $start, $end)['cumplimiento']);
+        $this->actingAs($this->admin());
+        $result = $this->get('admin/estadisticas?vista=mes');
+        $result->assertSee('N/D');
+        $result->assertSee('0 con uniforme / 0 análisis concluyentes');
+        $empty = $service->analisis(1, $end, $end->modify('+1 day'));
+        $this->assertSame(0, $empty['total']);
+        $this->assertNull($empty['cumplimiento']);
+    }
+
+    public function testHistoryShowsAllClassificationsWithoutBrokenPhotoLinks(): void
+    {
+        $this->db->table('detecciones')->insertBatch([
+            ['id' => 3, 'empresa_id' => 1, 'dispositivo_id' => 1, 'fecha' => gmdate('Y-m-d H:i:s'), 'clasificacion' => 'con_uniforme', 'motivo' => 'Motivo con uniforme', 'foto_ruta' => null],
+            ['id' => 4, 'empresa_id' => 1, 'dispositivo_id' => 1, 'fecha' => gmdate('Y-m-d H:i:s'), 'clasificacion' => 'no_concluyente', 'motivo' => 'Motivo no concluyente', 'foto_ruta' => null],
+        ]);
+        $this->actingAs($this->admin());
+        $result = $this->get('admin/detecciones');
+        $result->assertSee('Con uniforme');
+        $result->assertSee('Sin uniforme');
+        $result->assertSee('No concluyente');
+        $result->assertDontSee('MOTIVO PRIVADO AJENO');
+        foreach ([3, 4] as $id) {
+            $detail = $this->get('admin/detecciones/' . $id);
+            $detail->assertOK();
+            $detail->assertSee('Sin fotografía registrada');
+            $detail->assertSee('No aplica');
+            $this->assertStringNotContainsString('/detecciones/' . $id . '/foto', $detail->response()->getBody());
+            $this->assertNotFound('admin/detecciones/' . $id . '/foto');
+        }
+        $this->get('admin/detecciones/1')->assertSee('Fotografía de la detección');
+        $this->assertNotFound('admin/detecciones/2');
+    }
+
+    public function testAnalysisTotalsFollowDailyHourlyAndMonthlyChartPeriods(): void
+    {
+        $this->actingAs($this->admin());
+        $today = (new DateTimeImmutable('now', new DateTimeZone('America/Guatemala')))->setTime(0, 0);
+        foreach ([
+            [100, $today, 'con_uniforme'],
+            [101, $today->modify('-20 days'), 'no_concluyente'],
+            [102, $today->modify('-400 days'), 'con_uniforme'],
+            [103, $today->modify('+1 day'), 'con_uniforme'],
+            [104, $today->modify('-14 days'), 'con_uniforme'],
+        ] as [$id, $date, $classification]) {
+            $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => 1, 'dispositivo_id' => 1, 'fecha' => \App\Libraries\PanelTime::utc($date), 'clasificacion' => $classification]);
+        }
+        foreach (['dia' => 2, 'hora' => 2, 'mes' => 4] as $mode => $expected) {
+            $result = $this->get('admin/estadisticas?vista=' . $mode . '&desde=' . $today->format('Y-m-d') . '&hasta=' . $today->format('Y-m-d'));
+            $result->assertOK();
+            preg_match('~data-analysis="total".*?<strong>([0-9,]+)</strong>~s', $result->response()->getBody(), $total);
+            $this->assertSame((string) $expected, $total[1]);
+        }
+    }
+
+    public function testTelegramFailureDoesNotLoseStoredInfringementOrPhoto(): void
+    {
+        $base = $this->useAnalysisStorage();
+        $ia = $this->createMock(\App\Services\UniformeIAService::class);
+        $ia->expects($this->once())->method('analizar')->willReturn(['clasificacion' => 'sin_uniforme', 'motivo' => 'Incumplimiento de prueba']);
+        $telegram = $this->createMock(\App\Services\TelegramService::class);
+        $telegram->expects($this->once())->method('enviarFoto')->willThrowException(new RuntimeException('Telegram no disponible'));
+        \Config\Services::injectMock('uniformeIA', $ia);
+        \Config\Services::injectMock('telegram', $telegram);
+        $result = $this->postAnalysis();
+        $result->assertStatus(201);
+        $result->assertJSONFragment(['ok' => true, 'clasificacion' => 'sin_uniforme', 'foto_guardada' => true, 'telegram_enviado' => false]);
+        $row = $this->db->table('detecciones')->where('id', 3)->get()->getRowArray();
+        $this->assertNotNull($row['foto_ruta']);
+        $this->assertFalse(\App\Services\DispositivoHorarioService::boolean($row['telegram_enviado']));
+        $this->assertSame($this->analysisJpeg(), file_get_contents($base . '/' . $row['foto_ruta']));
+    }
+
+    public function testConUniformeChartsAndDefaultSinUniformeWorkInAllModesAndPages(): void
+    {
+        foreach ([[100, 1, 'con_uniforme'], [101, 1, 'con_uniforme'], [102, 1, 'no_concluyente'], [103, 2, 'con_uniforme']] as [$id, $company, $classification]) {
+            $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => $company, 'dispositivo_id' => $company, 'fecha' => gmdate('Y-m-d H:i:s'), 'clasificacion' => $classification]);
+        }
+        $this->actingAs($this->admin());
+        $today = (new DateTimeImmutable('now', new DateTimeZone('America/Guatemala')))->format('Y-m-d');
+        foreach (['admin', 'admin/estadisticas'] as $page) {
+            foreach (['dia' => 'día', 'hora' => 'hora', 'mes' => 'mes'] as $mode => $label) {
+                $query = '?empresa=1&vista=' . $mode . '&desde=' . $today . '&hasta=' . $today;
+                $compliant = $this->get($page . $query . '&clasificacion=con_uniforme');
+                $compliant->assertOK();
+                $compliant->assertSee('Con uniforme por ' . $label);
+                preg_match_all('~<span class="chart-count">(\d+)</span>~', $compliant->response()->getBody(), $values);
+                $this->assertSame(2, array_sum(array_map('intval', $values[1])));
+                $this->assertStringContainsString('value="con_uniforme" selected', $compliant->response()->getBody());
+                // The original period indicators always count infringements.
+                $cards = explode('<section class="card">', $compliant->response()->getBody(), 2)[0];
+                $this->assertSame(3, substr_count($cards, '<strong>1</strong>'));
+                $default = $this->get($page . $query);
+                $default->assertOK();
+                $default->assertSee('Incumplimientos por ' . $label);
+                $body = $default->response()->getBody();
+                preg_match_all('~<span class="chart-count">(\d+)</span>~', $body, $values);
+                $this->assertSame(1, array_sum(array_map('intval', $values[1])));
+                preg_match('~<select id="clasificacion"[^>]*>(.*?)</select>~s', $body, $selector);
+                $this->assertStringContainsString('value="sin_uniforme" selected', $selector[1]);
+                $this->assertStringNotContainsString('no_concluyente', $selector[1]);
+            }
+        }
+    }
+
+    public function testConUniformeHourlyAndMonthlyQueriesPreserveLocalBoundariesAndZeros(): void
+    {
+        foreach ([[100, 1, '2026-10-26 05:59:59'], [101, 1, '2026-10-26 06:00:00'], [102, 1, '2026-10-27 05:59:59'], [103, 1, '2026-10-27 06:00:00'], [104, 2, '2026-10-26 06:00:00']] as [$id, $company, $date]) {
+            $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => $company, 'dispositivo_id' => $company, 'fecha' => $date, 'clasificacion' => 'con_uniforme']);
+        }
+        $service = new \App\Services\EstadisticasService();
+        $hours = $service->porHora(1, 'America/Guatemala', '2026-10-26', '2026-10-26', 'con_uniforme');
+        $this->assertCount(24, $hours['2026-10-26']);
+        $this->assertSame(1, $hours['2026-10-26'][0]);
+        $this->assertSame(1, $hours['2026-10-26'][23]);
+        $this->assertSame(0, $hours['2026-10-26'][1]);
+        $this->assertSame(2, array_sum($hours['2026-10-26']));
+        $months = $service->porMes(1, 'America/Guatemala', new DateTimeImmutable('2026-10-27 05:59:59', new DateTimeZone('UTC')), 'con_uniforme');
+        $this->assertCount(12, $months);
+        $this->assertSame(3, $months['2026-10']['total']);
+        $this->assertSame(0, $months['2026-09']['total']);
+    }
+
+    public function testChartClassificationRejectsUnsupportedValuesAndForeignCompanies(): void
+    {
+        $this->actingAs($this->admin());
+        foreach (['admin', 'admin/estadisticas'] as $page) {
+            foreach (['no_concluyente', 'invalid'] as $classification) {
+                $this->get($page . '?clasificacion=' . $classification)->assertStatus(400);
+            }
+            $this->get($page . '?clasificacion[]=con_uniforme')->assertStatus(400);
+            $this->assertNotFound($page . '?empresa=2&clasificacion=con_uniforme');
+        }
+        $service = new \App\Services\EstadisticasService();
+        foreach (['mes', 'hora'] as $mode) {
+            try {
+                if ($mode === 'mes') $service->porMes(1, 'UTC', null, 'no_concluyente');
+                else $service->porHora(1, 'UTC', '2026-10-26', '2026-10-26', 'no_concluyente');
+                $this->fail('Unsupported chart classification accepted.');
+            } catch (InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
     }
 }

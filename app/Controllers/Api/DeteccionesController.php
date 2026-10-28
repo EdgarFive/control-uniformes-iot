@@ -3,8 +3,6 @@
 namespace App\Controllers\Api;
 
 use App\Controllers\BaseController;
-use App\Services\UniformeIAService;
-use App\Services\TelegramService;
 use App\Services\DispositivoHorarioService;
 
 class DeteccionesController extends BaseController
@@ -120,7 +118,7 @@ class DeteccionesController extends BaseController
         }
 
         // Leer directamente los bytes de la fotografía enviada.
-        $imagen = file_get_contents('php://input');
+        $imagen = $this->request->getBody() ?? '';
 
         if ($imagen === false) {
             return $this->error(
@@ -175,7 +173,7 @@ class DeteccionesController extends BaseController
 
         // 5. Analizar primero con Gemini
         try {
-            $ia = new UniformeIAService();
+            $ia = service('uniformeIA');
 
             $resultado = $ia->analizar(
                 $imagen,
@@ -192,8 +190,29 @@ class DeteccionesController extends BaseController
 
         $clasificacion = $resultado['clasificacion'];
 
-        // 6. Con uniforme o no concluyente: descartar
+        $fecha = gmdate('Y-m-d H:i:s');
+
+        // 6. Con uniforme o no concluyente: registrar solo los datos, sin imagen.
         if ($clasificacion !== 'sin_uniforme') {
+            try {
+                $guardado = $db->table('detecciones')->insert([
+                    'empresa_id' => $empresaId,
+                    'dispositivo_id' => (int) $dispositivo['id'],
+                    'fecha' => $fecha,
+                    'clasificacion' => $clasificacion,
+                    'motivo' => $resultado['motivo'],
+                    'foto_ruta' => null,
+                    'tamano_bytes' => null,
+                    'telegram_enviado' => null,
+                ]);
+                if (! $guardado) {
+                    throw new \RuntimeException('No se pudo registrar el análisis');
+                }
+            } catch (\Throwable $e) {
+                log_message('error', 'Registro de análisis: ' . $e->getMessage());
+                return $this->error(500, 'No se pudo guardar la detección');
+            }
+
             return $this->response->setJSON([
                 'ok' => true,
                 'clasificacion' => $clasificacion,
@@ -251,7 +270,7 @@ class DeteccionesController extends BaseController
             $guardado = $db->table('detecciones')->insert([
                 'empresa_id' => $empresaId,
                 'dispositivo_id' => (int) $dispositivo['id'],
-                'fecha' => gmdate('Y-m-d H:i:s'),
+                'fecha' => $fecha,
                 'foto_ruta' => $empresaId . '/' . $nombreArchivo,
                 'tamano_bytes' => $tamano,
                 'clasificacion' => 'sin_uniforme',
@@ -271,7 +290,7 @@ class DeteccionesController extends BaseController
             $telegramEnviado = false;
 
             try {
-                $telegram = new TelegramService();
+                $telegram = service('telegram');
 
                 $telegramEnviado = $telegram->enviarFoto(
                     $ruta,

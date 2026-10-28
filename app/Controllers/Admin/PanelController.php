@@ -50,7 +50,7 @@ class PanelController extends BaseController
         }
         [$title, $subtitle, $section] = match ($view) {
             'dashboard' => ['Resumen de actividad', 'Incumplimientos registrados por tus dispositivos.', ''],
-            'estadisticas' => ['Estadísticas', 'Consulta los incumplimientos registrados por tu empresa.', '/estadisticas'],
+            'estadisticas' => ['Estadísticas', 'Consulta los análisis y los incumplimientos registrados por tu empresa.', '/estadisticas'],
             'historial' => ['Historial de detecciones', 'Consulta evidencias, motivos y notificaciones.', '/detecciones'],
             'detalle' => ['Detección #' . $data['row']['id'], 'Evidencia y resultado del análisis de uniforme.', '/detecciones'],
             'dispositivos' => ['Dispositivos', 'Cámaras registradas en ' . $context['company']['nombre'] . '.', '/dispositivos'],
@@ -84,6 +84,10 @@ class PanelController extends BaseController
         if (! $context['company']) {
             return $this->render($view, $context);
         }
+        $chartClass = $this->request->getGet('clasificacion') ?? 'sin_uniforme';
+        if (! is_string($chartClass) || ! in_array($chartClass, ['sin_uniforme', 'con_uniforme'], true)) {
+            return $this->response->setStatusCode(400)->setBody('Clasificación de gráfica inválida.');
+        }
         $company = $context['company'];
         $now = new DateTimeImmutable('now', PanelTime::zone($company['zona_horaria']));
         $today = $now->setTime(0, 0);
@@ -99,7 +103,7 @@ class PanelController extends BaseController
         for ($i = 13; $i >= 0; $i--) {
             $day = $today->modify('-' . $i . ' days');
             $days[] = ['label' => $day->format('d/m'), 'total' => db_connect()->table('detecciones')
-                ->where('empresa_id', $company['id'])->where('clasificacion', 'sin_uniforme')
+                ->where('empresa_id', $company['id'])->where('clasificacion', $chartClass)
                 ->where('fecha >=', PanelTime::utc($day))->where('fecha <', PanelTime::utc($day->modify('+1 day')))
                 ->where('fecha <=', $end)->countAllResults()];
         }
@@ -108,6 +112,8 @@ class PanelController extends BaseController
         $to = $this->request->getGet('hasta') ?? $from;
         $hourly = [];
         $monthly = [];
+        $analyses = null;
+        $analysisPeriod = '';
         $error = null;
         $permitirMensual = true;
         $modes = $permitirMensual ? ['dia', 'hora', 'mes'] : ['dia', 'hora'];
@@ -117,18 +123,24 @@ class PanelController extends BaseController
         }
         try {
             if ($mode === 'mes') {
-                $monthly = (new EstadisticasService())->porMes((int) $company['id'], $company['zona_horaria'], $now);
+                $monthly = (new EstadisticasService())->porMes((int) $company['id'], $company['zona_horaria'], $now, $chartClass);
+                $analysisStart = $today->modify('first day of this month')->modify('-11 months');
+                $analysisEnd = $today->modify('first day of next month');
             } else {
                 // Preserve validation and queries for the existing daily/hourly modes.
-                $hourly = (new EstadisticasService())->porHora((int) $company['id'], $company['zona_horaria'], $from, $to);
+                $hourly = (new EstadisticasService())->porHora((int) $company['id'], $company['zona_horaria'], $from, $to, $chartClass);
+                $analysisStart = $mode === 'hora' ? PanelTime::day($from, PanelTime::zone($company['zona_horaria'])) : $today->modify('-13 days');
+                $analysisEnd = $mode === 'hora' ? PanelTime::day($to, PanelTime::zone($company['zona_horaria']))->modify('+1 day') : $today->modify('+1 day');
             }
+            $analyses = (new EstadisticasService())->analisis((int) $company['id'], $analysisStart, $analysisEnd, $mode === 'hora' ? null : $now);
+            $analysisPeriod = $analysisStart->format('d/m/Y') . ' – ' . ($mode === 'hora' ? $analysisEnd->modify('-1 day') : $today)->format('d/m/Y');
         } catch (\InvalidArgumentException $e) {
             $error = $e->getMessage();
         }
         $recent = $view === 'dashboard'
             ? $this->detections((int) $company['id'])->orderBy('d.fecha', 'DESC')->orderBy('d.id', 'DESC')->limit(6)->get()->getResultArray()
             : [];
-        return $this->render($view, $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'monthly', 'permitirMensual', 'error'));
+        return $this->render($view, $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'monthly', 'permitirMensual', 'analyses', 'analysisPeriod', 'chartClass', 'error'));
     }
 
     public function historial()

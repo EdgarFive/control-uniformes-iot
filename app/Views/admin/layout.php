@@ -21,6 +21,6 @@
     <?php if (session('message')): ?><div class="notice" role="status"><?= esc(session('message')) ?></div><?php endif ?>
     <?php if (session('error')): ?><div class="notice danger" role="alert"><?= esc(session('error')) ?></div><?php endif ?>
     <?= $this->renderSection('content') ?>
-    <footer class="page-footer">Solo se almacenan incumplimientos. Horario: <?= esc($company['zona_horaria']) ?>.</footer>
+    <footer class="page-footer">Se registran los análisis; solo se conservan fotografías de incumplimientos. Horario: <?= esc($company['zona_horaria']) ?>.</footer>
 </main></div>
 </body></html>
