@@ -107,21 +107,28 @@ class PanelController extends BaseController
         $from = $this->request->getGet('desde') ?? $today->format('Y-m-d');
         $to = $this->request->getGet('hasta') ?? $from;
         $hourly = [];
+        $monthly = [];
         $error = null;
-        if (! is_string($mode) || ! in_array($mode, ['dia', 'hora'], true)
+        $permitirMensual = true;
+        $modes = $permitirMensual ? ['dia', 'hora', 'mes'] : ['dia', 'hora'];
+        if (! is_string($mode) || ! in_array($mode, $modes, true)
             || ! is_string($from) || ! is_string($to) || strlen($from) !== 10 || strlen($to) !== 10) {
             return $this->response->setStatusCode(400)->setBody('Filtros inválidos.');
         }
         try {
-            // Validate filters in both modes; the historical daily chart stays intact.
-            $hourly = (new EstadisticasService())->porHora((int) $company['id'], $company['zona_horaria'], $from, $to);
+            if ($mode === 'mes') {
+                $monthly = (new EstadisticasService())->porMes((int) $company['id'], $company['zona_horaria'], $now);
+            } else {
+                // Preserve validation and queries for the existing daily/hourly modes.
+                $hourly = (new EstadisticasService())->porHora((int) $company['id'], $company['zona_horaria'], $from, $to);
+            }
         } catch (\InvalidArgumentException $e) {
             $error = $e->getMessage();
         }
         $recent = $view === 'dashboard'
             ? $this->detections((int) $company['id'])->orderBy('d.fecha', 'DESC')->orderBy('d.id', 'DESC')->limit(6)->get()->getResultArray()
             : [];
-        return $this->render($view, $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'error'));
+        return $this->render($view, $context, compact('stats', 'days', 'recent', 'mode', 'from', 'to', 'hourly', 'monthly', 'permitirMensual', 'error'));
     }
 
     public function historial()

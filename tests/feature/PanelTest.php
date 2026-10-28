@@ -444,7 +444,8 @@ final class PanelTest extends CIUnitTestCase
             foreach ([$summary, $statistics] as $index => $result) {
                 preg_match('~<div class="stats-grid">.*?</section>~s', $result->response()->getBody(), $content);
                 $this->assertNotEmpty($content);
-                $rendered[$index] = $content[0];
+                // Compare chart content independently of selector options.
+                $rendered[$index] = preg_replace('~<select id="vista".*?</select>~s', '', $content[0]);
             }
             $this->assertSame($rendered[0], $rendered[1]);
         }
@@ -465,5 +466,84 @@ final class PanelTest extends CIUnitTestCase
         $this->get('admin/estadisticas?vista=hora&desde=2026-02-30&hasta=2026-02-30')->assertSee('Introduce fechas válidas');
         $this->get('admin/estadisticas?vista[]=hora')->assertStatus(400);
         $this->assertNotFound('admin/estadisticas?empresa=2');
+    }
+
+    public function testMonthlyCountsTwelveMonthsWithUtcBoundsYearsAndZeros(): void
+    {
+        foreach ([
+            [100, 1, '2025-02-01 05:59:59', 'sin_uniforme'],
+            [101, 1, '2025-02-01 06:00:00', 'sin_uniforme'],
+            [102, 1, '2026-01-01 05:59:59', 'sin_uniforme'],
+            [103, 1, '2026-01-01 06:00:00', 'sin_uniforme'],
+            [104, 1, '2026-01-15 18:00:00', 'sin_uniforme'],
+            [105, 1, '2026-01-15 18:00:01', 'sin_uniforme'],
+            [106, 2, '2026-01-01 06:00:00', 'sin_uniforme'],
+            [107, 1, '2026-01-01 06:00:00', 'no_concluyente'],
+            [108, 1, '2025-01-15 18:00:00', 'sin_uniforme'],
+            [109, 1, '2026-02-01 06:00:00', 'sin_uniforme'],
+        ] as [$id, $company, $date, $classification]) {
+            $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => $company, 'dispositivo_id' => $company, 'fecha' => $date, 'clasificacion' => $classification]);
+        }
+        $this->db->table('detecciones')->where('id <', 100)->delete();
+        $now = new DateTimeImmutable('2026-01-15 18:00:00', new DateTimeZone('UTC'));
+        $service = new \App\Services\EstadisticasService();
+        $months = $service->porMes(1, 'America/Guatemala', $now);
+        $this->assertCount(12, $months);
+        $this->assertSame('2025-02', array_key_first($months));
+        $this->assertSame('2026-01', array_key_last($months));
+        $this->assertSame('Febrero 2025', $months['2025-02']['label']);
+        $this->assertSame('Enero 2026', $months['2026-01']['label']);
+        $this->assertSame(1, $months['2025-02']['total']);
+        $this->assertSame(1, $months['2025-12']['total']);
+        $this->assertSame(2, $months['2026-01']['total']);
+        $this->assertSame(0, $months['2025-03']['total']);
+        $this->assertSame(4, array_sum(array_column($months, 'total')));
+        $utcMonths = $service->porMes(1, 'UTC', $now);
+        $this->assertSame(3, $utcMonths['2026-01']['total']);
+        $this->assertSame(2, $utcMonths['2025-02']['total']);
+    }
+
+    public function testMonthlyCurrentMonthUsesCompanyZoneAndEmptyMonthsStayZero(): void
+    {
+        $this->db->table('detecciones')->where('empresa_id', 1)->delete();
+        $now = new DateTimeImmutable('2026-01-01 03:00:00', new DateTimeZone('UTC'));
+        $service = new \App\Services\EstadisticasService();
+        $localMonths = $service->porMes(1, 'America/Guatemala', $now);
+        $utcMonths = $service->porMes(1, 'UTC', $now);
+        $this->assertSame('2025-01', array_key_first($localMonths));
+        $this->assertSame('2025-12', array_key_last($localMonths));
+        $this->assertSame('2026-01', array_key_last($utcMonths));
+        $this->assertSame(array_fill(0, 12, 0), array_column($localMonths, 'total'));
+    }
+
+    public function testMonthlyPageSelectorAndTotalsAreAvailableInStatisticsAndSummary(): void
+    {
+        $this->actingAs($this->admin('admin', true, 'consulta'));
+        // Hourly date limits do not constrain the fixed 12-month monthly view.
+        $result = $this->get('admin/estadisticas?vista=mes&empresa=1&desde=2026-01-01&hasta=2026-12-31');
+        $result->assertOK();
+        $result->assertSee('Incumplimientos por mes');
+        $result->assertSee('Total del período: 1');
+        $result->assertSee('Ver valores por mes');
+        $result->assertSee('America/Guatemala');
+        $body = $result->response()->getBody();
+        $this->assertSame(12, substr_count($body, 'class="chart-count"'));
+        $this->assertMatchesRegularExpression('~<select id="vista"[^>]*>.*?Por hora.*?Por día.*?value="mes" selected>Por mes~s', $body);
+        $summary = $this->get('admin?empresa=1');
+        $summary->assertOK();
+        $summary->assertSee('Últimas detecciones');
+        $summary->assertSee('Incumplimientos por día');
+        $this->assertStringContainsString('value="mes"', $summary->response()->getBody());
+        $monthlySummary = $this->get('admin?vista=mes&empresa=1');
+        $monthlySummary->assertOK();
+        $monthlySummary->assertSee('Incumplimientos por mes');
+        $monthlySummary->assertSee('Total del período: 1');
+        $monthlySummary->assertSee('Últimas detecciones');
+        $this->assertSame(12, substr_count($monthlySummary->response()->getBody(), 'class="chart-count"'));
+        $this->assertNotFound('admin?vista=mes&empresa=2');
+        $this->assertNotFound('admin/estadisticas?vista=mes&empresa=2');
+        $this->db->table('usuarios_empresas')->where('empresa_id', 1)->update(['activo' => false]);
+        $this->get('admin/estadisticas?vista=mes')->assertStatus(403);
+        $this->get('admin?vista=mes')->assertStatus(403);
     }
 }
