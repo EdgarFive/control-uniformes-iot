@@ -22,10 +22,13 @@ final class EstadisticasService
             $counts[$row['clasificacion']] = (int) $row['total'];
         }
         $conclusive = $counts['con_uniforme'] + $counts['sin_uniforme'];
+        $compliance = $conclusive > 0 ? round($counts['con_uniforme'] / $conclusive * 100, 2) : null;
         return $counts + [
             'total' => array_sum($counts),
             'concluyentes' => $conclusive,
-            'cumplimiento' => $conclusive > 0 ? round($counts['con_uniforme'] / $conclusive * 100, 2) : null,
+            'cumplimiento' => $compliance,
+            // Complement the rounded share so the displayed percentages total 100%.
+            'incumplimiento' => $compliance === null ? null : round(100 - $compliance, 2),
         ];
     }
 

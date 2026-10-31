@@ -732,14 +732,19 @@ final class PanelTest extends CIUnitTestCase
         $zone = \App\Libraries\PanelTime::zone('America/Guatemala');
         $start = \App\Libraries\PanelTime::day('2026-10-26', $zone);
         $data = (new \App\Services\EstadisticasService())->analisis(1, $start, $start->modify('+1 day'));
-        $this->assertSame(['con_uniforme' => 2, 'sin_uniforme' => 1, 'no_concluyente' => 1, 'total' => 4, 'concluyentes' => 3, 'cumplimiento' => 66.67], $data);
+        $this->assertSame(['con_uniforme' => 2, 'sin_uniforme' => 1, 'no_concluyente' => 1, 'total' => 4, 'concluyentes' => 3, 'cumplimiento' => 66.67, 'incumplimiento' => 33.33], $data);
         $this->actingAs($this->admin());
         $result = $this->get('admin/estadisticas?vista=hora&desde=2026-10-26&hasta=2026-10-26');
         $result->assertOK();
-        $result->assertSee('66,67 %');
-        $result->assertSee('2 con uniforme / 3 análisis concluyentes');
+        $result->assertSee('Incumplimiento entre concluyentes');
+        $result->assertSee('33,33 %');
+        $result->assertSee('1 sin uniforme / 3 análisis concluyentes');
         $result->assertSee('Total del período: 1'); // Existing infringement chart remains unchanged.
         $result->assertDontSee('Antes de esta actualización solo se almacenaban incumplimientos');
+        $compliant = $this->get('admin/estadisticas?vista=hora&desde=2026-10-26&hasta=2026-10-26&clasificacion=con_uniforme');
+        $compliant->assertSee('Cumplimiento entre concluyentes');
+        $compliant->assertSee('66,67 %');
+        $compliant->assertSee('2 con uniforme / 3 análisis concluyentes');
     }
 
     public function testNoConclusiveAnalysesShowNdAndLegacyRowsAreNotReconstructed(): void
@@ -751,15 +756,51 @@ final class PanelTest extends CIUnitTestCase
         $this->assertSame(0, $legacy['con_uniforme']);
         $this->assertSame(1, $legacy['sin_uniforme']);
         $this->assertSame(0.0, $legacy['cumplimiento']);
+        $this->assertSame(100.0, $legacy['incumplimiento']);
         $this->db->table('detecciones')->where('empresa_id', 1)->update(['clasificacion' => 'no_concluyente', 'foto_ruta' => null]);
         $this->assertNull($service->analisis(1, $start, $end)['cumplimiento']);
+        $this->assertNull($service->analisis(1, $start, $end)['incumplimiento']);
         $this->actingAs($this->admin());
         $result = $this->get('admin/estadisticas?vista=mes');
         $result->assertSee('N/D');
-        $result->assertSee('0 con uniforme / 0 análisis concluyentes');
+        $result->assertSee('0 sin uniforme / 0 análisis concluyentes');
+        $this->get('admin/estadisticas?vista=mes&clasificacion=con_uniforme')->assertSee('N/D');
         $empty = $service->analisis(1, $end, $end->modify('+1 day'));
         $this->assertSame(0, $empty['total']);
         $this->assertNull($empty['cumplimiento']);
+        $this->assertNull($empty['incumplimiento']);
+    }
+
+    public function testConclusivePercentagesComplementEachOtherAndIgnoreInconclusiveRows(): void
+    {
+        $this->db->table('detecciones')->emptyTable();
+        $service = new \App\Services\EstadisticasService();
+        $start = new DateTimeImmutable('2026-10-26', new DateTimeZone('UTC'));
+        $end = $start->modify('+1 day');
+        $insert = function (string $classification): void {
+            $this->db->table('detecciones')->insert(['empresa_id' => 1, 'dispositivo_id' => 1,
+                'fecha' => '2026-10-26 12:00:00', 'clasificacion' => $classification]);
+        };
+        $insert('con_uniforme');
+        $onlyCompliant = $service->analisis(1, $start, $end);
+        $this->assertSame(100.0, $onlyCompliant['cumplimiento']);
+        $this->assertSame(0.0, $onlyCompliant['incumplimiento']);
+        for ($i = 0; $i < 31; $i++) {
+            $insert('sin_uniforme');
+        }
+        $before = $service->analisis(1, $start, $end);
+        $this->assertSame(3.13, $before['cumplimiento']);
+        $this->assertSame(96.87, $before['incumplimiento']);
+        $this->assertEqualsWithDelta(100.0, $before['cumplimiento'] + $before['incumplimiento'], 0.00001);
+        for ($i = 0; $i < 50; $i++) {
+            $insert('no_concluyente');
+        }
+        $after = $service->analisis(1, $start, $end);
+        $this->assertSame(82, $after['total']);
+        $this->assertSame(50, $after['no_concluyente']);
+        $this->assertSame(32, $after['concluyentes']);
+        $this->assertSame($before['cumplimiento'], $after['cumplimiento']);
+        $this->assertSame($before['incumplimiento'], $after['incumplimiento']);
     }
 
     public function testHistoryShowsAllClassificationsWithoutBrokenPhotoLinks(): void
@@ -799,11 +840,18 @@ final class PanelTest extends CIUnitTestCase
         ] as [$id, $date, $classification]) {
             $this->db->table('detecciones')->insert(['id' => $id, 'empresa_id' => 1, 'dispositivo_id' => 1, 'fecha' => \App\Libraries\PanelTime::utc($date), 'clasificacion' => $classification]);
         }
-        foreach (['dia' => 2, 'hora' => 2, 'mes' => 4] as $mode => $expected) {
-            $result = $this->get('admin/estadisticas?vista=' . $mode . '&desde=' . $today->format('Y-m-d') . '&hasta=' . $today->format('Y-m-d'));
+        foreach (['dia' => [2, 1], 'hora' => [2, 1], 'mes' => [4, 2]] as $mode => [$expected, $compliantCount]) {
+            $url = 'admin/estadisticas?vista=' . $mode . '&desde=' . $today->format('Y-m-d') . '&hasta=' . $today->format('Y-m-d');
+            $result = $this->get($url);
             $result->assertOK();
             preg_match('~data-analysis="total".*?<strong>([0-9,]+)</strong>~s', $result->response()->getBody(), $total);
             $this->assertSame((string) $expected, $total[1]);
+            $denominator = $compliantCount + 1;
+            $result->assertSee('1 sin uniforme / ' . $denominator . ' análisis concluyentes');
+            $result->assertSee($mode === 'mes' ? '33,33 %' : '50,00 %');
+            $compliant = $this->get($url . '&clasificacion=con_uniforme');
+            $compliant->assertSee($compliantCount . ' con uniforme / ' . $denominator . ' análisis concluyentes');
+            $compliant->assertSee($mode === 'mes' ? '66,67 %' : '50,00 %');
         }
     }
 
@@ -838,6 +886,8 @@ final class PanelTest extends CIUnitTestCase
                 $compliant = $this->get($page . $query . '&clasificacion=con_uniforme');
                 $compliant->assertOK();
                 $compliant->assertSee('Con uniforme por ' . $label);
+                $compliant->assertSee('Cumplimiento entre concluyentes');
+                $compliant->assertSee('66,67 %');
                 preg_match_all('~<span class="chart-count">(\d+)</span>~', $compliant->response()->getBody(), $values);
                 $this->assertSame(2, array_sum(array_map('intval', $values[1])));
                 $this->assertStringContainsString('value="con_uniforme" selected', $compliant->response()->getBody());
@@ -847,6 +897,8 @@ final class PanelTest extends CIUnitTestCase
                 $default = $this->get($page . $query);
                 $default->assertOK();
                 $default->assertSee('Incumplimientos por ' . $label);
+                $default->assertSee('Incumplimiento entre concluyentes');
+                $default->assertSee('33,33 %');
                 $body = $default->response()->getBody();
                 preg_match_all('~<span class="chart-count">(\d+)</span>~', $body, $values);
                 $this->assertSame(1, array_sum(array_map('intval', $values[1])));

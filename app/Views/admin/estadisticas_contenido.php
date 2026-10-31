@@ -21,7 +21,8 @@
 <?php foreach (['total' => 'Total de análisis', 'con_uniforme' => 'Con uniforme', 'sin_uniforme' => 'Sin uniforme', 'no_concluyente' => 'No concluyente'] as $key => $label): ?>
 <article class="stat-card" data-analysis="<?= $key ?>"><div class="stat-top"><?= $label ?></div><strong><?= number_format($analyses[$key]) ?></strong><small>análisis registrados</small></article>
 <?php endforeach ?>
-<article class="stat-card" data-analysis="cumplimiento"><div class="stat-top">Cumplimiento entre concluyentes</div><strong><?= $analyses['cumplimiento'] === null ? 'N/D' : number_format($analyses['cumplimiento'], 2, ',', '.') . ' %' ?></strong><small><?= (int) $analyses['con_uniforme'] ?> con uniforme / <?= (int) $analyses['concluyentes'] ?> análisis concluyentes. Se excluyen los no concluyentes.</small></article>
+<?php $percentageKey = $chartClass === 'con_uniforme' ? 'cumplimiento' : 'incumplimiento'; ?>
+<article class="stat-card" data-analysis="<?= $percentageKey ?>"><div class="stat-top"><?= $chartClass === 'con_uniforme' ? 'Cumplimiento' : 'Incumplimiento' ?> entre concluyentes</div><strong><?= $analyses[$percentageKey] === null ? 'N/D' : number_format($analyses[$percentageKey], 2, ',', '.') . ' %' ?></strong><small><?= (int) $analyses[$chartClass] ?> <?= strtolower($chartLabel) ?> / <?= (int) $analyses['concluyentes'] ?> análisis concluyentes. Se excluyen los no concluyentes.</small></article>
 </div></div>
 <?php endif ?>
 <?php if ($mode === 'dia'): ?>
